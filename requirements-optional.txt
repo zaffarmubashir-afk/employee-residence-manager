@@ -1,0 +1,5 @@
+# Nothing here is required to run the app (it uses only Python's
+# standard library: tkinter + sqlite3). Install these only if you want:
+
+openpyxl       # enables the "Export to Excel" button on the Reports tab
+pyinstaller    # lets you build a standalone EmployeeResidenceManager.exe
