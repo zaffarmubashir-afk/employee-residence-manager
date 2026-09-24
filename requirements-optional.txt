@@ -1,5 +1,17 @@
-# Nothing here is required to run the app (it uses only Python's
-# standard library: tkinter + sqlite3). Install these only if you want:
+# Nothing here is required for the core app (it runs on tkinter + sqlite3,
+# both part of the Python standard library). Install what you need:
 
 openpyxl       # enables the "Export to Excel" button on the Reports tab
 pyinstaller    # lets you build a standalone EmployeeResidenceManager.exe
+
+# --- "Import from PDF / Scanned Documents / Photos" (Employees tab) ---
+pymupdf        # reads text-based PDFs + rasterizes pages for OCR (preferred)
+pypdf          # lighter fallback for reading text-based PDFs only
+pillow         # image handling, needed for OCR and for non-PNG logo uploads
+pytesseract    # Python wrapper for the Tesseract-OCR engine
+
+# pytesseract also needs the separate Tesseract-OCR program installed
+# (it is NOT a pip package). Windows installer:
+#   https://github.com/UB-Mannheim/tesseract/wiki
+# Without it, scanned PDFs and photos can't be auto-read - text-based
+# PDFs still work fine with just pymupdf/pypdf.

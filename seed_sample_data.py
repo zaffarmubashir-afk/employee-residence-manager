@@ -18,7 +18,8 @@ def d(days_from_today):
 def run():
     db.init_db()
     if db.list_companies():
-        print("Database already has data - skipping seed (delete data/erms.db to reset).")
+        print(f"Database already has data - skipping seed.\n"
+              f"(Delete the file at {db.DB_PATH} to reset.)")
         return
 
     c1 = db.add_company({

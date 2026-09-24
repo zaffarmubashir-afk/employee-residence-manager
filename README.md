@@ -59,13 +59,25 @@ bank guarantees, etc.) via the free-form "Other Documents" tab.
 - **Reports / Export** — filter the master list by status, export to
   CSV (always available) or Excel (`pip install openpyxl` for
   colour-coded `.xlsx`).
+- **Import from PDF / Scanned Documents / Photos** (Employees tab) —
+  select any number of passport, Emirates ID, or visa PDFs/photos at
+  once and the app reads names, numbers, and expiry dates out of them
+  automatically, so you don't have to type in thousands of employees by
+  hand. Every result is shown in an editable table for you to check and
+  fix before anything is saved. See **section 4** below for what this
+  needs installed.
 - **Settings** — adjust the Critical / Warning / Upcoming day
-  thresholds to match your own renewal lead-time policy, and review a
-  full activity log (who/what/when was added, edited, or deleted).
+  thresholds to match your own renewal lead-time policy; upload your
+  company logo (shown at the top of the app); create a Desktop
+  shortcut; back up or restore your data; and review a full activity
+  log (who/what/when was added, edited, or deleted).
 
-All data is stored locally in a single SQLite file at
-`data/erms.db` — easy to back up (just copy the file) or move between
-machines.
+All data is stored locally in a single SQLite file in your Windows
+user profile at `%APPDATA%\EmployeeResidenceManager\erms.db` — **not**
+inside the app/install folder. This matters: it's what makes your data
+survive closing and reopening the app (including the packaged `.exe`),
+moving/reinstalling the app, and Windows updates. It's also
+automatically backed up every time you close the app (see section 5).
 
 ---
 
@@ -85,23 +97,67 @@ machines.
    python seed_sample_data.py
    python main.py
    ```
-5. (Optional, for the Excel export button) Install the one optional
-   dependency:
+5. (Optional extras) Install any of these as needed:
    ```
-   pip install openpyxl
+   pip install openpyxl                       # Excel export button
+   pip install pymupdf pillow                 # read text-based PDFs
+   pip install pymupdf pillow pytesseract      # + OCR scanned PDFs/photos
    ```
+   See **section 4** for the full picture on the PDF/photo import
+   feature, including the one piece (Tesseract-OCR) that isn't a `pip
+   install`.
 
 ---
 
-## 4. Turning it into a double-click Windows `.exe`
+## 4. Setting up "Import from PDF / Scanned Documents / Photos"
+
+The Employees tab has an **Import from PDF/Photos** button that reads
+passport, Emirates ID, and visa documents automatically instead of you
+typing every employee in by hand. It has two tiers of capability,
+each needing different optional packages — the app tells you in
+**Settings** which of these you currently have:
+
+| Capability | What it reads | Needs |
+|---|---|---|
+| **Text-based PDFs** | A PDF that was generated/printed from a computer (has selectable text) | `pip install pymupdf` (or `pip install pypdf` as a lighter fallback) |
+| **Scanned PDFs & photos (OCR)** | A scanned page or a phone photo of a document, where the "text" is really just pixels | The above, **plus** `pip install pillow pytesseract`, **plus** the free Tesseract-OCR program itself (this is a separate program, not a Python package — pytesseract is just a wrapper around it) |
+
+**Installing Tesseract-OCR (one-time, only needed for scans/photos):**
+1. Download the Windows installer from the UB-Mannheim build:
+   https://github.com/UB-Mannheim/tesseract/wiki
+2. Run it (default install location is fine).
+3. Restart the app. Check **Settings → Employee Import from PDF /
+   Photos** — it should now show a green checkmark for OCR.
+
+Without Tesseract, the import tool still works fully for text-based
+PDFs; scanned/photographed documents will just come back empty and
+need to be filled in by hand, with a clear warning shown in the import
+window.
+
+**Passport reading** uses the machine-readable zone (MRZ) — the two
+lines of `<<<<` text at the bottom of the passport photo page — which
+is far more reliable than reading the printed text, when it's visible
+in the scan/photo. Emirates ID, visa, and labour card documents are
+read by looking for their labelled fields (ID number, "Date of
+Expiry", etc.).
+
+**Because OCR is never 100% accurate**, nothing is saved automatically
+— every import shows an editable table first so you (or whoever is
+onboarding the batch) can fix anything before it's added as an
+employee record. For very large batches (hundreds/thousands of files),
+processing runs in the background so the app stays responsive, with a
+live progress count and a Cancel button.
+
+---
+
+## 5. Turning it into a double-click Windows `.exe`
 
 PyInstaller must be run **on a Windows machine** (it builds for the OS
 it's run on), so do this step on your own PC:
 
 ```
 pip install pyinstaller
-pyinstaller --onefile --windowed --name "EmployeeResidenceManager" ^
-    --add-data "data;data" main.py
+pyinstaller --onefile --windowed --name "EmployeeResidenceManager" main.py
 ```
 
 This produces `dist\EmployeeResidenceManager.exe` — a single file you
@@ -109,12 +165,34 @@ can copy anywhere and double-click, no Python installation needed on
 the target machine. A ready-made `build_exe.bat` script that runs this
 for you is included in this folder — just double-click it on Windows.
 
-> Tip: the packaged `.exe` will create its `data\erms.db` file next to
-> wherever it's run from the first time you launch it.
+If you want the PDF/photo import feature to work in the `.exe` too,
+install the packages from section 4 *before* running PyInstaller so
+they get bundled in.
+
+> Your data is **not** stored next to the `.exe` — it lives in
+> `%APPDATA%\EmployeeResidenceManager\` (see section 2), so it
+> survives across app restarts, reinstalls, and rebuilding the `.exe`.
 
 ---
 
-## 5. Project structure
+## 6. Desktop Shortcut & Backups
+
+- **Desktop shortcut**: Settings → **Create Desktop Shortcut** adds an
+  icon on your Windows Desktop that launches the app directly (it uses
+  your uploaded company logo as the icon if you've set one).
+- **Automatic backups**: every time you close the app, a timestamped
+  copy of the database is saved to
+  `%APPDATA%\EmployeeResidenceManager\backups\` (the most recent 20
+  copies are kept). Settings → **Automatic backups** lists them, with a
+  one-click **Restore Selected**.
+- **Manual backup/restore**: Settings → **Backup Now** saves a `.zip`
+  (database + your logo) anywhere you choose — a USB drive, a synced
+  cloud folder, etc. **Restore from Backup File** loads one back in
+  (it safety-backs-up your current data first, just in case).
+
+---
+
+## 7. Project structure
 
 ```
 EmployeeResidenceManager/
@@ -126,18 +204,32 @@ EmployeeResidenceManager/
 ├── LICENSE
 ├── GITHUB_SETUP.md          # step-by-step guide to push this to GitHub
 ├── .github/workflows/build-exe.yml   # auto-builds the .exe via GitHub Actions
-├── data/                    # SQLite database lives here (auto-created)
+├── data/                    # legacy location, kept only for one-time migration
 └── app/
-    ├── database.py          # schema + all CRUD operations
+    ├── database.py          # schema + all CRUD operations + app-data-folder logic
     ├── utils.py              # date math, expiry classification, report builder
     ├── export.py              # CSV / Excel export
-    ├── widgets.py               # date picker, generic form dialog, dashboard cards
-    └── main_window.py            # all six tabs (UI)
+    ├── backup.py               # automatic + manual backup/restore
+    ├── shortcut.py              # Desktop shortcut creation
+    ├── pdf_extract.py            # PDF/photo text extraction + field parsing (MRZ, OCR)
+    ├── import_dialog.py           # bulk "Import from PDF/Photos" review table
+    ├── widgets.py                  # date picker, generic form dialog, dashboard cards, logo loader
+    └── main_window.py                # all six tabs (UI)
 ```
+
+> **Note on `%APPDATA%`**: earlier versions of this app stored
+> `erms.db` in the `data/` folder next to the app itself. That's fixed
+> now — the database lives in your Windows user profile instead, which
+> is what actually solves the "my data disappears when I reopen the
+> app" problem (packaged `.exe` files run from a temporary folder that
+> Windows deletes on exit, which is what was wiping the old location
+> every time). If you have existing data in the old `data/erms.db`,
+> the app copies it across automatically, once, the first time you run
+> this version.
 
 ---
 
-## 6. Customizing further
+## 8. Customizing further
 
 - **Add a new document type** to the Companies or Employees form: add a
   column in `app/database.py` (`COMPANY_FIELDS`/`EMPLOYEE_FIELDS` +
@@ -153,7 +245,7 @@ EmployeeResidenceManager/
 
 ---
 
-## 7. Putting this on GitHub
+## 9. Putting this on GitHub
 
 See **[GITHUB_SETUP.md](GITHUB_SETUP.md)** for copy-paste commands to
 push this project to a new GitHub repo, plus a ready-made GitHub Actions

@@ -8,12 +8,18 @@ Dashboard / Companies / Employees / Other Documents / Reports / Settings.
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import os
+import shutil
 from datetime import date
 
 from app import database as db
 from app import utils
 from app import export as exp
-from app.widgets import FormDialog, StatCard, FONT_HEADER, FONT_SUBHEADER, FONT_BOLD, FONT_NORMAL
+from app import backup as bk
+from app import shortcut as sc
+from app import pdf_extract as pe
+from app.widgets import (FormDialog, StatCard, load_logo_image,
+                          FONT_HEADER, FONT_SUBHEADER, FONT_BOLD, FONT_NORMAL)
+from app.import_dialog import BulkImportDialog
 
 APP_TITLE = "UAE Employee & Company Residence / Document Management System"
 
@@ -29,10 +35,14 @@ class App(tk.Tk):
 
         header = ttk.Frame(self, padding=(16, 10))
         header.pack(fill="x")
-        ttk.Label(header, text="\U0001F3E2  " + APP_TITLE, font=FONT_HEADER).pack(side="left")
+        self.logo_lbl = ttk.Label(header)
+        self.logo_lbl.pack(side="left", padx=(0, 10))
+        self.title_lbl = ttk.Label(header, text="\U0001F3E2  " + APP_TITLE, font=FONT_HEADER)
+        self.title_lbl.pack(side="left")
         self.today_lbl = ttk.Label(header, text=date.today().strftime("Today: %d %b %Y"),
                                     font=FONT_NORMAL)
         self.today_lbl.pack(side="right")
+        self.refresh_logo()
 
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
@@ -89,6 +99,17 @@ class App(tk.Tk):
     def goto_employee(self, employee_id):
         self.notebook.select(self.employees_tab)
         self.employees_tab.select_employee(employee_id)
+
+    def refresh_logo(self):
+        """Reload the company logo (if any) into the header. Called on
+        startup and whenever Settings uploads/removes a logo."""
+        path = db.get_setting("company_logo_path", "")
+        img = load_logo_image(path, max_height=42)
+        self._logo_ref = img  # keep a reference - Tkinter won't
+        if img:
+            self.logo_lbl.configure(image=img)
+        else:
+            self.logo_lbl.configure(image="")
 
 
 def tag_rows(tree, status):
@@ -415,17 +436,45 @@ class EmployeesTab(ttk.Frame):
         ttk.Button(toolbar, text="Edit", command=self.edit_employee).pack(side="left", padx=4)
         ttk.Button(toolbar, text="Delete", command=self.delete_employee).pack(side="left", padx=4)
         ttk.Button(toolbar, text="Documents", command=self.view_documents).pack(side="left", padx=4)
+        ttk.Button(toolbar, text="\U0001F4C4 Import from PDF/Photos...",
+                   command=self.import_from_files).pack(side="left", padx=(14, 4))
 
-        columns = ("id", "name", "company", "title", "visa_exp", "eid_exp", "labour_exp", "status")
-        self.tree = ttk.Treeview(self, columns=columns, show="headings", height=20)
-        headers = ["ID", "Full Name", "Company", "Job Title", "Visa Expiry", "Emirates ID Expiry",
-                   "Labour Card Expiry", "Status"]
-        widths = [40, 190, 190, 140, 110, 130, 130, 90]
+        # Every employee field is shown as one wide row - use both a
+        # vertical AND a horizontal scrollbar so nothing is ever hidden;
+        # scroll sideways to see the rest of that employee's details.
+        table_frame = ttk.Frame(self)
+        table_frame.pack(fill="both", expand=True)
+
+        columns = ("id", "name", "code", "company", "nationality", "gender", "dob", "title", "doj",
+                   "passport_no", "passport_exp", "entry_permit_no", "entry_permit_exp",
+                   "visa_no", "visa_exp", "sponsor", "eid_no", "eid_exp",
+                   "labour_no", "labour_exp", "contract_no", "contract_exp",
+                   "medical_date", "medical_exp", "insurance_no", "insurance_exp",
+                   "salary", "status", "cancel_date", "phone", "email", "notes")
+        headers = ["ID", "Full Name", "Emp. Code", "Company", "Nationality", "Gender", "Date of Birth",
+                   "Job Title", "Date of Joining", "Passport No.", "Passport Expiry", "Entry Permit No.",
+                   "Entry Permit Expiry", "Residence Visa No.", "Visa Expiry", "Visa Sponsor",
+                   "Emirates ID No.", "Emirates ID Expiry", "Labour Card No.", "Labour Card Expiry",
+                   "Contract No.", "Contract Expiry", "Medical Test Date", "Medical Test Expiry",
+                   "Insurance No.", "Insurance Expiry", "Basic Salary", "Status", "Cancellation Date",
+                   "Phone", "Email", "Notes"]
+        widths = [40, 170, 90, 170, 110, 70, 100, 140, 100, 110, 110, 110, 120, 120, 110, 100, 140,
+                  120, 120, 130, 120, 120, 110, 120, 120, 120, 90, 90, 110, 110, 170, 180]
+        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=20)
         for c, h, w in zip(columns, headers, widths):
             self.tree.heading(c, text=h)
-            self.tree.column(c, width=w, anchor="w")
+            self.tree.column(c, width=w, anchor="w", stretch=False)
         self.tree.column("id", width=40, stretch=False)
-        self.tree.pack(fill="both", expand=True)
+
+        vs = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        hs = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vs.set, xscrollcommand=hs.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vs.grid(row=0, column=1, sticky="ns")
+        hs.grid(row=1, column=0, sticky="ew")
+        table_frame.rowconfigure(0, weight=1)
+        table_frame.columnconfigure(0, weight=1)
+
         configure_status_tags(self.tree)
         self.tree.bind("<Double-1>", lambda e: self.edit_employee())
 
@@ -451,14 +500,26 @@ class EmployeesTab(ttk.Frame):
                     st, _ = utils.classify(e[exp_field], today)
                     if _rank(st) > _rank(worst_status):
                         worst_status = st
-            self.tree.insert("", "end", iid=str(e["id"]),
-                              values=(e["id"], e["full_name"], e["company_name"] or "-",
-                                      e["job_title"] or "-",
-                                      utils.fmt_date_display(e["residence_visa_expiry"]),
-                                      utils.fmt_date_display(e["emirates_id_expiry"]),
-                                      utils.fmt_date_display(e["labour_card_expiry"]),
-                                      e["status"]),
-                              tags=(utils.STATUS_ROW_TAGS[worst_status],))
+            self.tree.insert(
+                "", "end", iid=str(e["id"]),
+                values=(
+                    e["id"], e["full_name"], e["employee_code"] or "-", e["company_name"] or "-",
+                    e["nationality"] or "-", e["gender"] or "-", utils.fmt_date_display(e["date_of_birth"]),
+                    e["job_title"] or "-", utils.fmt_date_display(e["date_of_joining"]),
+                    e["passport_no"] or "-", utils.fmt_date_display(e["passport_expiry"]),
+                    e["entry_permit_no"] or "-", utils.fmt_date_display(e["entry_permit_expiry"]),
+                    e["residence_visa_no"] or "-", utils.fmt_date_display(e["residence_visa_expiry"]),
+                    e["visa_sponsor"] or "-", e["emirates_id_no"] or "-",
+                    utils.fmt_date_display(e["emirates_id_expiry"]), e["labour_card_no"] or "-",
+                    utils.fmt_date_display(e["labour_card_expiry"]), e["employment_contract_no"] or "-",
+                    utils.fmt_date_display(e["employment_contract_expiry"]),
+                    utils.fmt_date_display(e["medical_test_date"]),
+                    utils.fmt_date_display(e["medical_test_expiry"]), e["insurance_policy_no"] or "-",
+                    utils.fmt_date_display(e["insurance_expiry"]), e["basic_salary"] or "-", e["status"],
+                    utils.fmt_date_display(e["cancellation_date"]), e["phone"] or "-", e["email"] or "-",
+                    (e["notes"] or "").replace("\n", " ")[:200],
+                ),
+                tags=(utils.STATUS_ROW_TAGS[worst_status],))
 
     def filter_to_company(self, company_id):
         opts = self._company_options()
@@ -548,6 +609,14 @@ class EmployeesTab(ttk.Frame):
             return
         self.app.notebook.select(self.app.documents_tab)
         self.app.documents_tab.filter_to_owner("employee", eid)
+
+    def import_from_files(self):
+        if not db.list_companies():
+            messagebox.showwarning("No companies", "Add a company first (Companies tab), then try again.")
+            return
+        opts = self._company_options()
+        default_company_id = opts.get(self.company_filter_var.get())
+        BulkImportDialog(self, self.app, default_company_id=default_company_id)
 
 
 # ============================================================== OTHER DOCS
@@ -805,39 +874,130 @@ class ReportsTab(ttk.Frame):
 # ============================================================== SETTINGS
 class SettingsTab(ttk.Frame):
     def __init__(self, parent, app):
-        super().__init__(parent, padding=20)
+        super().__init__(parent, padding=0)
         self.app = app
+        self._logo_preview_ref = None
 
-        ttk.Label(self, text="Alert Thresholds (days before expiry)", font=FONT_SUBHEADER).grid(
-            row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
+        # Scrollable body - there's now a lot on this tab.
+        outer_canvas = tk.Canvas(self, highlightthickness=0)
+        vscroll = ttk.Scrollbar(self, orient="vertical", command=outer_canvas.yview)
+        body = ttk.Frame(outer_canvas, padding=20)
+        body.bind("<Configure>", lambda e: outer_canvas.configure(scrollregion=outer_canvas.bbox("all")))
+        outer_canvas.create_window((0, 0), window=body, anchor="nw")
+        outer_canvas.configure(yscrollcommand=vscroll.set)
+        outer_canvas.pack(side="left", fill="both", expand=True)
+        vscroll.pack(side="right", fill="y")
+
+        def _on_mousewheel(event):
+            outer_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        outer_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        row = 0
+
+        # -------------------------------------------------- alert thresholds
+        ttk.Label(body, text="Alert Thresholds (days before expiry)", font=FONT_SUBHEADER).grid(
+            row=row, column=0, columnspan=3, sticky="w", pady=(0, 12)); row += 1
 
         self.critical_var = tk.StringVar(value=db.get_setting("alert_critical_days", "15"))
         self.warning_var = tk.StringVar(value=db.get_setting("alert_warning_days", "30"))
         self.upcoming_var = tk.StringVar(value=db.get_setting("alert_upcoming_days", "60"))
 
-        self._labeled_entry("Critical (red) if expiry within:", self.critical_var, 1)
-        self._labeled_entry("Warning (orange) if expiry within:", self.warning_var, 2)
-        self._labeled_entry("Upcoming (yellow) if expiry within:", self.upcoming_var, 3)
+        row = self._labeled_entry(body, "Critical (red) if expiry within:", self.critical_var, row)
+        row = self._labeled_entry(body, "Warning (orange) if expiry within:", self.warning_var, row)
+        row = self._labeled_entry(body, "Upcoming (yellow) if expiry within:", self.upcoming_var, row)
 
-        ttk.Button(self, text="Save Settings", command=self.save_settings, style="Accent.TButton").grid(
-            row=4, column=0, sticky="w", pady=16)
+        ttk.Button(body, text="Save Settings", command=self.save_settings, style="Accent.TButton").grid(
+            row=row, column=0, sticky="w", pady=16); row += 1
 
-        ttk.Separator(self).grid(row=5, column=0, columnspan=2, sticky="ew", pady=16)
+        ttk.Separator(body).grid(row=row, column=0, columnspan=3, sticky="ew", pady=16); row += 1
 
-        ttk.Label(self, text="Database Location", font=FONT_SUBHEADER).grid(row=6, column=0, sticky="w")
-        ttk.Label(self, text=db.DB_PATH, font=FONT_NORMAL, foreground="#555").grid(
-            row=7, column=0, columnspan=2, sticky="w", pady=(2, 12))
+        # -------------------------------------------------- company branding
+        ttk.Label(body, text="Company Branding", font=FONT_SUBHEADER).grid(
+            row=row, column=0, columnspan=3, sticky="w"); row += 1
+        ttk.Label(body, text="Shown at the top of the app and available for use on reports.",
+                  foreground="#666").grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 8)); row += 1
 
-        ttk.Label(self, text="Recent Activity Log", font=FONT_SUBHEADER).grid(row=8, column=0, sticky="w")
-        self.log_box = tk.Listbox(self, width=100, height=14, font=("Consolas", 9))
-        self.log_box.grid(row=9, column=0, columnspan=2, sticky="w", pady=6)
-        ttk.Button(self, text="Refresh Log", command=self.refresh_log).grid(row=10, column=0, sticky="w")
+        self.logo_preview_lbl = ttk.Label(body)
+        self.logo_preview_lbl.grid(row=row, column=0, sticky="w", pady=4)
+        btn_col = ttk.Frame(body)
+        btn_col.grid(row=row, column=1, sticky="w")
+        ttk.Button(btn_col, text="Upload Logo...", command=self.upload_logo).pack(anchor="w", pady=2)
+        ttk.Button(btn_col, text="Remove Logo", command=self.remove_logo).pack(anchor="w", pady=2)
+        row += 1
+        self._refresh_logo_preview()
+
+        ttk.Separator(body).grid(row=row, column=0, columnspan=3, sticky="ew", pady=16); row += 1
+
+        # -------------------------------------------------- desktop shortcut
+        ttk.Label(body, text="Desktop Shortcut", font=FONT_SUBHEADER).grid(
+            row=row, column=0, columnspan=3, sticky="w"); row += 1
+        ttk.Label(body, text="Add an icon on your Desktop to open this app directly.",
+                  foreground="#666").grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 8)); row += 1
+        ttk.Button(body, text="Create Desktop Shortcut", command=self.create_shortcut).grid(
+            row=row, column=0, sticky="w"); row += 1
+
+        ttk.Separator(body).grid(row=row, column=0, columnspan=3, sticky="ew", pady=16); row += 1
+
+        # -------------------------------------------------- backup & restore
+        ttk.Label(body, text="Backup & Restore", font=FONT_SUBHEADER).grid(
+            row=row, column=0, columnspan=3, sticky="w"); row += 1
+        ttk.Label(body, text="Every record is saved to disk immediately, and a safety copy is also "
+                              "kept automatically each time you close the app. Use \u2018Backup Now\u2019 "
+                              "to save your own copy somewhere safe (USB drive, cloud folder, etc.).",
+                  foreground="#666", wraplength=760, justify="left").grid(
+            row=row, column=0, columnspan=3, sticky="w", pady=(0, 8)); row += 1
+
+        backup_btns = ttk.Frame(body)
+        backup_btns.grid(row=row, column=0, columnspan=3, sticky="w"); row += 1
+        ttk.Button(backup_btns, text="Backup Now...", command=self.backup_now).pack(side="left")
+        ttk.Button(backup_btns, text="Restore from Backup File...", command=self.restore_from_file).pack(
+            side="left", padx=6)
+        ttk.Button(backup_btns, text="Open Backups Folder", command=self.open_backups_folder).pack(
+            side="left", padx=6)
+
+        ttk.Label(body, text="Automatic backups (most recent first):", font=FONT_BOLD).grid(
+            row=row, column=0, columnspan=3, sticky="w", pady=(10, 2)); row += 1
+        self.autobackup_list = tk.Listbox(body, width=60, height=6, font=("Consolas", 9))
+        self.autobackup_list.grid(row=row, column=0, columnspan=2, sticky="w"); 
+        ttk.Button(body, text="Restore Selected", command=self.restore_selected_auto_backup).grid(
+            row=row, column=2, sticky="nw"); row += 1
+        self._refresh_auto_backups()
+
+        ttk.Separator(body).grid(row=row, column=0, columnspan=3, sticky="ew", pady=16); row += 1
+
+        # -------------------------------------------------- PDF/OCR import
+        ttk.Label(body, text="Employee Import from PDF / Photos", font=FONT_SUBHEADER).grid(
+            row=row, column=0, columnspan=3, sticky="w"); row += 1
+        for label, ok, hint in pe.capability_report():
+            mark = "\u2705" if ok else "\u26A0"
+            color = "#1e8449" if ok else "#b9770e"
+            ttk.Label(body, text=f"{mark} {label}", foreground=color).grid(
+                row=row, column=0, columnspan=3, sticky="w"); row += 1
+            if not ok:
+                ttk.Label(body, text=f"    To enable: {hint}", foreground="#888").grid(
+                    row=row, column=0, columnspan=3, sticky="w"); row += 1
+
+        ttk.Separator(body).grid(row=row, column=0, columnspan=3, sticky="ew", pady=16); row += 1
+
+        # -------------------------------------------------- database location
+        ttk.Label(body, text="Database Location", font=FONT_SUBHEADER).grid(row=row, column=0, sticky="w")
+        row += 1
+        ttk.Label(body, text=db.DB_PATH, font=FONT_NORMAL, foreground="#555").grid(
+            row=row, column=0, columnspan=3, sticky="w", pady=(2, 12)); row += 1
+
+        # -------------------------------------------------- activity log
+        ttk.Label(body, text="Recent Activity Log", font=FONT_SUBHEADER).grid(row=row, column=0, sticky="w")
+        row += 1
+        self.log_box = tk.Listbox(body, width=100, height=14, font=("Consolas", 9))
+        self.log_box.grid(row=row, column=0, columnspan=3, sticky="w", pady=6); row += 1
+        ttk.Button(body, text="Refresh Log", command=self.refresh_log).grid(row=row, column=0, sticky="w")
 
         self.refresh_log()
 
-    def _labeled_entry(self, label, var, row):
-        ttk.Label(self, text=label, width=32).grid(row=row, column=0, sticky="w", pady=4)
-        ttk.Entry(self, textvariable=var, width=8).grid(row=row, column=1, sticky="w")
+    def _labeled_entry(self, body, label, var, row):
+        ttk.Label(body, text=label, width=32).grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Entry(body, textvariable=var, width=8).grid(row=row, column=1, sticky="w")
+        return row + 1
 
     def save_settings(self):
         try:
@@ -853,6 +1013,120 @@ class SettingsTab(ttk.Frame):
         db.set_setting("alert_upcoming_days", str(up))
         messagebox.showinfo("Saved", "Settings saved.")
         self.app.refresh_all()
+
+    # ---------------------------------------------------------------- logo
+    def _refresh_logo_preview(self):
+        path = db.get_setting("company_logo_path", "")
+        img = load_logo_image(path, max_height=64)
+        self._logo_preview_ref = img
+        if img:
+            self.logo_preview_lbl.configure(image=img, text="")
+        else:
+            self.logo_preview_lbl.configure(image="", text="(no logo uploaded)", foreground="#888")
+
+    def upload_logo(self):
+        src = filedialog.askopenfilename(
+            title="Choose a company logo",
+            filetypes=[("Image files", "*.png *.jpg *.jpeg *.gif *.bmp"), ("All files", "*.*")])
+        if not src:
+            return
+        try:
+            os.makedirs(db.LOGO_DIR, exist_ok=True)
+            ext = os.path.splitext(src)[1].lower() or ".png"
+            dest = os.path.join(db.LOGO_DIR, f"logo{ext}")
+            # remove any previous logo file (possibly a different extension)
+            if os.path.isdir(db.LOGO_DIR):
+                for f in os.listdir(db.LOGO_DIR):
+                    if f.startswith("logo"):
+                        try:
+                            os.remove(os.path.join(db.LOGO_DIR, f))
+                        except OSError:
+                            pass
+            shutil.copy2(src, dest)
+            db.set_setting("company_logo_path", dest)
+        except Exception as e:
+            messagebox.showerror("Upload failed", str(e))
+            return
+        self._refresh_logo_preview()
+        self.app.refresh_logo()
+
+    def remove_logo(self):
+        db.set_setting("company_logo_path", "")
+        self._refresh_logo_preview()
+        self.app.refresh_logo()
+
+    # ----------------------------------------------------------- shortcut
+    def create_shortcut(self):
+        icon_path = db.get_setting("company_logo_path", "") or None
+        ok, msg = sc.create_desktop_shortcut(icon_path)
+        (messagebox.showinfo if ok else messagebox.showwarning)("Desktop Shortcut", msg)
+
+    # ------------------------------------------------------------ backups
+    def backup_now(self):
+        path = filedialog.asksaveasfilename(
+            defaultextension=".zip", filetypes=[("Backup archive", "*.zip")],
+            initialfile=f"erms_backup_{date.today().isoformat()}.zip")
+        if not path:
+            return
+        try:
+            bk.export_backup_zip(path)
+            messagebox.showinfo("Backup saved", f"Backup saved to:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Backup failed", str(e))
+
+    def restore_from_file(self):
+        path = filedialog.askopenfilename(title="Choose a backup file",
+                                           filetypes=[("Backup archive", "*.zip"), ("All files", "*.*")])
+        if not path:
+            return
+        if not messagebox.askyesno(
+                "Confirm restore",
+                "This replaces all current data with the contents of this backup.\n\n"
+                "A safety copy of what you have now will be made first. Continue?"):
+            return
+        bk.auto_backup()
+        try:
+            bk.restore_from_zip(path)
+        except Exception as e:
+            messagebox.showerror("Restore failed", str(e))
+            return
+        messagebox.showinfo("Restored", "Backup restored successfully.")
+        self._refresh_logo_preview()
+        self.app.refresh_logo()
+        self.app.refresh_all()
+        self._refresh_auto_backups()
+
+    def _refresh_auto_backups(self):
+        self.autobackup_list.delete(0, "end")
+        self._auto_backup_paths = []
+        for path, label in bk.list_auto_backups():
+            self.autobackup_list.insert("end", label)
+            self._auto_backup_paths.append(path)
+
+    def restore_selected_auto_backup(self):
+        sel = self.autobackup_list.curselection()
+        if not sel:
+            messagebox.showinfo("Select", "Select an automatic backup from the list first.")
+            return
+        path = self._auto_backup_paths[sel[0]]
+        if not messagebox.askyesno(
+                "Confirm restore",
+                "This replaces all current data with this automatic backup.\n\n"
+                "A safety copy of what you have now will be made first. Continue?"):
+            return
+        bk.auto_backup()
+        try:
+            bk.restore_from_db_file(path)
+        except Exception as e:
+            messagebox.showerror("Restore failed", str(e))
+            return
+        messagebox.showinfo("Restored", "Backup restored successfully.")
+        self.app.refresh_all()
+        self._refresh_auto_backups()
+
+    def open_backups_folder(self):
+        if not bk.open_backups_folder():
+            messagebox.showinfo("Backups Folder", db.BACKUP_DIR)
 
     def refresh_log(self):
         self.log_box.delete(0, "end")

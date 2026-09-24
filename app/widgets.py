@@ -12,12 +12,47 @@ Windows machine with a standard Python install.
 import tkinter as tk
 from tkinter import ttk
 import calendar
+import os
 from datetime import date
+
+try:
+    from PIL import Image, ImageTk
+    HAVE_PIL_IMAGE = True
+except ImportError:
+    HAVE_PIL_IMAGE = False
 
 FONT_NORMAL = ("Segoe UI", 10)
 FONT_BOLD = ("Segoe UI", 10, "bold")
 FONT_HEADER = ("Segoe UI", 16, "bold")
 FONT_SUBHEADER = ("Segoe UI", 12, "bold")
+
+
+def load_logo_image(path, max_height=42):
+    """Load an image file for display at up to `max_height` px tall,
+    preserving aspect ratio. Returns a Tk-compatible PhotoImage, or None
+    if the path is empty/missing/unreadable.
+
+    Uses Pillow when available (handles JPG/PNG/BMP/etc. and resizes
+    smoothly). Falls back to Tk's own PhotoImage (PNG/GIF only, and can
+    only shrink by whole-number factors) when Pillow isn't installed, so
+    a logo still shows up even on a minimal install.
+    Keep a reference to the returned object on a long-lived widget/attr -
+    Tkinter does not keep PhotoImages alive on its own.
+    """
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        if HAVE_PIL_IMAGE:
+            img = Image.open(path)
+            img.thumbnail((max_height * 6, max_height))
+            return ImageTk.PhotoImage(img)
+        photo = tk.PhotoImage(file=path)
+        if photo.height() > max_height:
+            factor = max(1, photo.height() // max_height)
+            photo = photo.subsample(factor, factor)
+        return photo
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------- calendar

@@ -19,10 +19,72 @@ activity_log      : simple audit trail of add/edit/delete/renew actions
 
 import sqlite3
 import os
+import sys
+import shutil
 from datetime import date
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "data", "erms.db")
+APP_NAME = "EmployeeResidenceManager"
+
+
+def _app_data_dir():
+    """A per-user, per-machine folder that is NEVER inside the app/exe
+    folder and NEVER inside a PyInstaller --onefile temp-extraction
+    folder. This is the fix for "my data disappears when I close and
+    reopen the app": a onefile .exe unpacks itself into a fresh temp
+    directory (sys._MEIPASS) on every launch and deletes it on exit, so
+    anything stored relative to the app's own path is wiped every time.
+    Windows: %APPDATA%\\EmployeeResidenceManager
+    macOS:   ~/Library/Application Support/EmployeeResidenceManager
+    Linux:   $XDG_DATA_HOME/EmployeeResidenceManager (or ~/.local/share/...)
+    """
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    elif sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Application Support")
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    path = os.path.join(base, APP_NAME)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+DATA_DIR = _app_data_dir()
+DB_PATH = os.path.join(DATA_DIR, "erms.db")
+LOGO_DIR = os.path.join(DATA_DIR, "branding")
+BACKUP_DIR = os.path.join(DATA_DIR, "backups")
+
+
+def _legacy_db_candidates():
+    """Where earlier versions of this app used to store erms.db, so we
+    can migrate anyone's existing data into the new, safe location."""
+    candidates = []
+    try:
+        if getattr(sys, "frozen", False):
+            exe_dir = os.path.dirname(sys.executable)
+            candidates.append(os.path.join(exe_dir, "data", "erms.db"))
+            meipass = getattr(sys, "_MEIPASS", None)
+            if meipass:
+                candidates.append(os.path.join(meipass, "data", "erms.db"))
+        else:
+            src_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            candidates.append(os.path.join(src_dir, "data", "erms.db"))
+    except Exception:
+        pass
+    return candidates
+
+
+def _migrate_legacy_db():
+    """One-time, best-effort migration. Runs only if the new location has
+    no database yet, so it never overwrites newer data."""
+    if os.path.exists(DB_PATH):
+        return
+    for legacy_path in _legacy_db_candidates():
+        try:
+            if os.path.exists(legacy_path) and os.path.getsize(legacy_path) > 0:
+                shutil.copy2(legacy_path, DB_PATH)
+                return
+        except Exception:
+            continue
 
 
 def get_connection():
@@ -131,11 +193,16 @@ DEFAULT_SETTINGS = {
     "alert_upcoming_days": "60",   # yellow: expires within this many days
     "company_name_header": "My Company Group",
     "reminder_email": "",
+    "company_logo_path": "",
+    "shortcut_offered": "0",
 }
 
 
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    os.makedirs(LOGO_DIR, exist_ok=True)
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    _migrate_legacy_db()
     conn = get_connection()
     conn.executescript(SCHEMA)
     for k, v in DEFAULT_SETTINGS.items():
