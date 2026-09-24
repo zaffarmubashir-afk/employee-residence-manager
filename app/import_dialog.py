@@ -37,8 +37,20 @@ COLUMNS = [
     ("passport_expiry", "Passport Expiry", 105),
     ("emirates_id_no", "Emirates ID No.", 140),
     ("emirates_id_expiry", "Emirates ID Expiry", 115),
+    ("entry_permit_no", "Entry Permit No.", 125),
+    ("entry_permit_expiry", "Entry Permit Expiry", 125),
+    ("residence_visa_no", "Residence Visa No.", 125),
     ("residence_visa_expiry", "Visa Expiry", 100),
+    ("labour_card_no", "Labour Card No.", 125),
     ("labour_card_expiry", "Labour Card Expiry", 115),
+    ("employment_contract_no", "Contract No.", 125),
+    ("employment_contract_expiry", "Contract Expiry", 115),
+    ("medical_test_date", "Medical Test Date", 115),
+    ("medical_test_expiry", "Medical Test Expiry", 115),
+    ("insurance_policy_no", "Insurance Policy No.", 135),
+    ("insurance_expiry", "Insurance Expiry", 115),
+    ("phone", "Phone", 120),
+    ("email", "Email", 180),
     ("notes", "Extraction Notes", 170),
 ]
 EDITABLE_COLUMNS = {c for c, _, _ in COLUMNS} - {"include", "file", "notes"}
@@ -75,6 +87,8 @@ class BulkImportDialog(tk.Toplevel):
                      state="readonly", width=28).pack(side="left", padx=8)
 
         ttk.Button(top, text="Add Files...", command=self.pick_files).pack(side="left", padx=(16, 4))
+        ttk.Button(top, text="Add Folder...", command=self.pick_folder).pack(side="left", padx=4)
+        ttk.Button(top, text="Merge Matching Documents", command=self.merge_matching).pack(side="left", padx=4)
         self.cancel_btn = ttk.Button(top, text="Cancel Processing", command=self._cancel, state="disabled")
         self.cancel_btn.pack(side="left", padx=4)
         self.progress_lbl = ttk.Label(top, text="", foreground="#555")
@@ -139,6 +153,25 @@ class BulkImportDialog(tk.Toplevel):
             return
         self._start_worker(list(paths))
 
+    def pick_folder(self):
+        if not self.company_map:
+            messagebox.showwarning("No companies", "Add a company first (Companies tab), then try again.")
+            return
+        folder = filedialog.askdirectory(title="Select folder containing employee PDFs / scans / photos")
+        if not folder:
+            return
+        allowed = {e.replace("*", "").lower() for e in ALLOWED_EXT}
+        paths = []
+        for root, _dirs, files in os.walk(folder):
+            for name in files:
+                if os.path.splitext(name)[1].lower() in allowed:
+                    paths.append(os.path.join(root, name))
+        paths.sort()
+        if not paths:
+            messagebox.showinfo("No supported files", "No PDF or supported image files were found in that folder.")
+            return
+        self._start_worker(paths)
+
     def _start_worker(self, paths):
         self._cancel_flag.clear()
         self.cancel_btn.configure(state="normal")
@@ -162,6 +195,56 @@ class BulkImportDialog(tk.Toplevel):
 
         self._worker = threading.Thread(target=work, daemon=True)
         self._worker.start()
+
+    @staticmethod
+    def _norm_identity(value):
+        return "".join(ch.lower() for ch in (value or "") if ch.isalnum())
+
+    def merge_matching(self):
+        """Merge rows that clearly belong to the same employee.
+        Strong identifiers (passport/EID) take priority; otherwise a normalized
+        full name is used. This is useful when passport, EID and visa are
+        separate files for the same person.
+        """
+        active = [r for r in self.rows if r is not None]
+        groups = {}
+        for row in active:
+            keys = []
+            if row.get("passport_no"):
+                keys.append(("passport", self._norm_identity(row["passport_no"])))
+            if row.get("emirates_id_no"):
+                keys.append(("eid", self._norm_identity(row["emirates_id_no"])))
+            if row.get("full_name") and row.get("date_of_birth"):
+                keys.append(("name_dob", self._norm_identity(row["full_name"]) + self._norm_identity(row["date_of_birth"])))
+            key = next((k for k in keys if k[1]), None)
+            if key:
+                groups.setdefault(key, []).append(row)
+
+        merged_count = 0
+        for _key, group in groups.items():
+            if len(group) < 2:
+                continue
+            master = group[0]
+            for other in group[1:]:
+                for c in EDITABLE_COLUMNS:
+                    if not master.get(c) and other.get(c):
+                        master[c] = other[c]
+                note = master.get("notes", "")
+                other_note = other.get("notes", "")
+                if other_note and other_note not in note:
+                    master["notes"] = (note + " | " + other_note).strip(" |")
+                master["file"] = (master.get("file","") + " + " + other.get("file","")).strip(" +")
+                other["include"] = False
+                merged_count += 1
+
+        # Rebuild the visible table from the merged row data.
+        self.tree.delete(*self.tree.get_children())
+        for idx, row in enumerate(self.rows):
+            if row is not None and row.get("include", True):
+                self.tree.insert("", "end", iid=str(idx), values=self._row_values(row))
+        messagebox.showinfo("Merge complete",
+                            f"Merged {merged_count} duplicate document row(s).\n"
+                            "Review the combined rows before importing.")
 
     def _cancel(self):
         self._cancel_flag.set()

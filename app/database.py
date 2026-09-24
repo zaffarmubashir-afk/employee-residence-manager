@@ -73,6 +73,33 @@ def _legacy_db_candidates():
     return candidates
 
 
+
+def _recover_from_latest_auto_backup():
+    """If the primary database was accidentally deleted, recover the newest
+    automatic snapshot before creating a fresh empty database."""
+    if os.path.exists(DB_PATH) or not os.path.isdir(BACKUP_DIR):
+        return False
+    try:
+        backups = [os.path.join(BACKUP_DIR, f) for f in os.listdir(BACKUP_DIR)
+                   if f.startswith("auto_") and f.endswith(".db")]
+        backups.sort(reverse=True)
+        for path in backups:
+            if os.path.getsize(path) <= 0:
+                continue
+            try:
+                conn = sqlite3.connect(path)
+                ok = conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+                conn.close()
+            except Exception:
+                ok = False
+            if ok:
+                shutil.copy2(path, DB_PATH)
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _migrate_legacy_db():
     """One-time, best-effort migration. Runs only if the new location has
     no database yet, so it never overwrites newer data."""
@@ -202,6 +229,7 @@ def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     os.makedirs(LOGO_DIR, exist_ok=True)
     os.makedirs(BACKUP_DIR, exist_ok=True)
+    _recover_from_latest_auto_backup()
     _migrate_legacy_db()
     conn = get_connection()
     conn.executescript(SCHEMA)

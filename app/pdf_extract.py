@@ -56,8 +56,20 @@ except ImportError:
     HAVE_PIL = False
 
 try:
-    import pytesseract  # needs the separate Tesseract-OCR program installed too
+    import pytesseract  # Python wrapper; the Tesseract engine is installed separately
     HAVE_TESSERACT = True
+    # Common Windows installation locations. This lets OCR work without
+    # requiring the user to edit PATH manually.
+    if os.name == "nt":
+        _tess_candidates = [
+            os.environ.get("TESSERACT_CMD", ""),
+            r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+            r"C:\\Program Files (x86)\\Tesseract-OCR\\tesseract.exe",
+        ]
+        for _candidate in _tess_candidates:
+            if _candidate and os.path.exists(_candidate):
+                pytesseract.pytesseract.tesseract_cmd = _candidate
+                break
 except ImportError:
     HAVE_TESSERACT = False
 
@@ -91,7 +103,30 @@ def _ocr_image(img):
     if not HAVE_TESSERACT:
         return ""
     try:
-        return pytesseract.image_to_string(img)
+        # Improve common phone scans/photos: grayscale, contrast and a
+        # moderate upscale. Keep the original available as a fallback.
+        work = img
+        if HAVE_PIL:
+            from PIL import ImageOps, ImageEnhance, ImageFilter
+            if work.mode not in ("L", "RGB"):
+                work = work.convert("RGB")
+            gray = ImageOps.grayscale(work)
+            gray = ImageEnhance.Contrast(gray).enhance(1.6)
+            if gray.width < 1800:
+                scale = min(2.0, 1800 / max(1, gray.width))
+                gray = gray.resize((int(gray.width * scale), int(gray.height * scale)))
+            work = gray.filter(ImageFilter.SHARPEN)
+        langs = "eng"
+        try:
+            available = pytesseract.get_languages(config="")
+            if "ara" in available:
+                langs = "eng+ara"
+        except Exception:
+            pass
+        text = pytesseract.image_to_string(work, lang=langs, config="--psm 6")
+        if not text.strip() and work is not img:
+            text = pytesseract.image_to_string(img, lang="eng", config="--psm 6")
+        return text
     except Exception:
         return ""
 
@@ -265,6 +300,19 @@ def _find_date_near(lines, *keywords):
     return ""
 
 
+def _find_labeled_value(text, labels, max_len=80):
+    """Find a value following one of several labels on the same line."""
+    label_re = "|".join(re.escape(x) for x in labels)
+    m = re.search(rf"(?:{label_re})\\s*(?:NO\\.?|NUMBER|NUM|#)?\\s*[:\\-]?\\s*([A-Z0-9][A-Z0-9 ./\\-]{{2,{max_len}}})", text, re.I)
+    return m.group(1).strip(" .:-") if m else ""
+
+def _find_number_by_pattern(text, patterns):
+    for pattern in patterns:
+        m = re.search(pattern, text, re.I)
+        if m:
+            return m.group(1).strip()
+    return ""
+
 def parse_labelled_fields(text):
     """Heuristic, label-driven extraction used for everything that isn't
     a passport MRZ: Emirates ID, residence visa, labour card, and as a
@@ -315,6 +363,45 @@ def parse_labelled_fields(text):
         exp = _find_date_near(lines, "EXPIRY", "VALID UNTIL")
         if exp:
             result.setdefault("labour_card_expiry", exp)
+
+    if "MEDICAL" in upper or "FITNESS" in upper:
+        dt = _find_date_near(lines, "DATE OF TEST", "TEST DATE", "MEDICAL DATE")
+        if dt:
+            result.setdefault("medical_test_date", dt)
+        exp = _find_date_near(lines, "EXPIRY", "VALID UNTIL")
+        if exp:
+            result.setdefault("medical_test_expiry", exp)
+
+    if "INSURANCE" in upper or "POLICY" in upper:
+        value = _find_labeled_value(joined, ["POLICY NO", "POLICY NUMBER", "POLICY"])
+        if value:
+            result.setdefault("insurance_policy_no", value[:80])
+        exp = _find_date_near(lines, "EXPIRY", "VALID UNTIL", "POLICY EXPIRY")
+        if exp:
+            result.setdefault("insurance_expiry", exp)
+
+    # Common UAE document numbers. These are deliberately conservative:
+    # the import window remains editable so OCR mistakes can be corrected.
+    value = _find_labeled_value(joined, ["RESIDENCE VISA", "RESIDENCY VISA", "VISA NO", "VISA NUMBER"])
+    if value:
+        result.setdefault("residence_visa_no", value[:80])
+
+    value = _find_labeled_value(joined, ["ENTRY PERMIT", "ENTRY PERMIT NO", "PERMIT NUMBER"])
+    if value:
+        result.setdefault("entry_permit_no", value[:80])
+
+    value = _find_labeled_value(joined, ["LABOUR CARD", "LABOR CARD", "WORK PERMIT", "WORK CARD"])
+    if value:
+        result.setdefault("labour_card_no", value[:80])
+
+    value = _find_labeled_value(joined, ["EMPLOYMENT CONTRACT", "CONTRACT NO", "CONTRACT NUMBER"])
+    if value:
+        result.setdefault("employment_contract_no", value[:80])
+
+    if "PHONE" in upper or "MOBILE" in upper or "TEL" in upper:
+        value = _find_labeled_value(joined, ["PHONE", "MOBILE", "MOBILE NO", "TEL", "TELEPHONE"])
+        if value:
+            result.setdefault("phone", value[:40])
 
     if re.search(r'\bSEX\s*[:\-]?\s*M\b', upper) or re.search(r'\bMALE\b', upper):
         result.setdefault("gender", "Male")

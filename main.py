@@ -49,6 +49,20 @@ def main():
         app.destroy()
 
     app.protocol("WM_DELETE_WINDOW", on_close)
+
+    # Keep a rolling safety snapshot even if Windows/app is terminated
+    # unexpectedly before the normal close handler runs.
+    def periodic_backup():
+        try:
+            bk.auto_backup()
+        except Exception:
+            pass
+        try:
+            app.after(5 * 60 * 1000, periodic_backup)
+        except Exception:
+            pass
+
+    app.after(5 * 60 * 1000, periodic_backup)
     app.mainloop()
 
 
