@@ -5,15 +5,22 @@ Bulk "Import employees from PDF / scanned documents / photos" workflow:
 
   1. Pick any number of PDF or image files at once (passport copies,
      Emirates ID scans, visa PDFs, phone photos of documents - any mix,
-     one file per employee). Good for onboarding a company with
-     thousands of employees without typing everything in by hand.
+     one file per employee - or a single multi-employee roster/list
+     file, e.g. a MOHRE "List of Employees" export). Good for
+     onboarding a company with thousands of employees without typing
+     everything in by hand.
   2. Each file is processed through app.pdf_extract on a background
      thread so the window never freezes, with a live progress count and
      a Cancel button for very large batches.
-  3. Results land in an editable table - NOTHING is written to the
+  3. A CSV/Excel spreadsheet can also be imported directly (via
+     app.tabular_import) - a fully reliable alternative for documents
+     too low-quality for OCR to read (e.g. small/coloured table text in
+     a low-resolution scan or screenshot). Type or paste the data in
+     once and every row imports exactly as typed, no guessing involved.
+  4. Results land in an editable table - NOTHING is written to the
      database yet. OCR and layout-guessing are never 100% reliable, so
      every row is reviewed (and fixable inline) before import.
-  4. Checked rows are inserted as new employees under the chosen company.
+  5. Checked rows are inserted as new employees under the chosen company.
 """
 import os
 import threading
@@ -23,6 +30,7 @@ from tkinter import ttk, messagebox, filedialog
 
 from app import database as db
 from app import pdf_extract as pe
+from app import tabular_import as ti
 from app.widgets import FONT_BOLD
 
 # (key, header, width)
@@ -33,27 +41,18 @@ COLUMNS = [
     ("nationality", "Nationality", 110),
     ("gender", "Gender", 65),
     ("date_of_birth", "Date of Birth", 100),
+    ("job_title", "Job Title", 140),
     ("passport_no", "Passport No.", 105),
     ("passport_expiry", "Passport Expiry", 105),
     ("emirates_id_no", "Emirates ID No.", 140),
     ("emirates_id_expiry", "Emirates ID Expiry", 115),
-    ("entry_permit_no", "Entry Permit No.", 125),
-    ("entry_permit_expiry", "Entry Permit Expiry", 125),
-    ("residence_visa_no", "Residence Visa No.", 125),
     ("residence_visa_expiry", "Visa Expiry", 100),
-    ("labour_card_no", "Labour Card No.", 125),
+    ("labour_card_no", "Labour Card No.", 115),
     ("labour_card_expiry", "Labour Card Expiry", 115),
-    ("employment_contract_no", "Contract No.", 125),
-    ("employment_contract_expiry", "Contract Expiry", 115),
-    ("medical_test_date", "Medical Test Date", 115),
-    ("medical_test_expiry", "Medical Test Expiry", 115),
-    ("insurance_policy_no", "Insurance Policy No.", 135),
-    ("insurance_expiry", "Insurance Expiry", 115),
-    ("phone", "Phone", 120),
-    ("email", "Email", 180),
-    ("notes", "Extraction Notes", 170),
+    ("notes", "Notes", 140),
+    ("status_note", "Extraction Status", 190),
 ]
-EDITABLE_COLUMNS = {c for c, _, _ in COLUMNS} - {"include", "file", "notes"}
+EDITABLE_COLUMNS = {c for c, _, _ in COLUMNS} - {"include", "file", "status_note"}
 ALLOWED_EXT = ("*.pdf", "*.jpg", "*.jpeg", "*.png", "*.bmp", "*.tif", "*.tiff", "*.webp")
 
 
@@ -87,8 +86,7 @@ class BulkImportDialog(tk.Toplevel):
                      state="readonly", width=28).pack(side="left", padx=8)
 
         ttk.Button(top, text="Add Files...", command=self.pick_files).pack(side="left", padx=(16, 4))
-        ttk.Button(top, text="Add Folder...", command=self.pick_folder).pack(side="left", padx=4)
-        ttk.Button(top, text="Merge Matching Documents", command=self.merge_matching).pack(side="left", padx=4)
+        ttk.Button(top, text="Import CSV/Excel...", command=self.pick_spreadsheet).pack(side="left", padx=4)
         self.cancel_btn = ttk.Button(top, text="Cancel Processing", command=self._cancel, state="disabled")
         self.cancel_btn.pack(side="left", padx=4)
         self.progress_lbl = ttk.Label(top, text="", foreground="#555")
@@ -96,7 +94,7 @@ class BulkImportDialog(tk.Toplevel):
 
         if not pe.CAN_OCR:
             ttk.Label(top, text="\u26A0 OCR not available on this machine - only text-based PDFs "
-                                 "will auto-fill. See Settings for setup steps.",
+                                 "will auto-fill. See Settings, or use 'Import CSV/Excel' instead.",
                       foreground="#b9770e", wraplength=380, justify="left").pack(side="right")
 
         # ---------------------------------------------------------- table
@@ -120,8 +118,11 @@ class BulkImportDialog(tk.Toplevel):
 
         ttk.Label(self, text="Double-click any cell to correct it before importing. "
                               "Click the \u2713 column to include/exclude a row. "
-                              "Scroll right to see every extracted field.",
-                  foreground="#666").pack(anchor="w", padx=12, pady=(4, 0))
+                              "Scroll right to see every extracted field. "
+                              "If a scan/photo is too low-quality to read automatically, retype "
+                              "just that file's data into a CSV/Excel sheet and use 'Import CSV/Excel' "
+                              "instead - it's 100% reliable since nothing has to be guessed.",
+                  foreground="#666", wraplength=1160, justify="left").pack(anchor="w", padx=12, pady=(4, 0))
 
         # ---------------------------------------------------------- bottom bar
         bottom = ttk.Frame(self, padding=10)
@@ -153,24 +154,36 @@ class BulkImportDialog(tk.Toplevel):
             return
         self._start_worker(list(paths))
 
-    def pick_folder(self):
+    def pick_spreadsheet(self):
         if not self.company_map:
             messagebox.showwarning("No companies", "Add a company first (Companies tab), then try again.")
             return
-        folder = filedialog.askdirectory(title="Select folder containing employee PDFs / scans / photos")
-        if not folder:
+        path = filedialog.askopenfilename(
+            title="Select a CSV or Excel file of employees",
+            filetypes=[("Spreadsheet files", "*.csv *.xlsx *.xlsm"), ("CSV files", "*.csv"),
+                       ("Excel files", "*.xlsx *.xlsm"), ("All files", "*.*")])
+        if not path:
             return
-        allowed = {e.replace("*", "").lower() for e in ALLOWED_EXT}
-        paths = []
-        for root, _dirs, files in os.walk(folder):
-            for name in files:
-                if os.path.splitext(name)[1].lower() in allowed:
-                    paths.append(os.path.join(root, name))
-        paths.sort()
-        if not paths:
-            messagebox.showinfo("No supported files", "No PDF or supported image files were found in that folder.")
+        try:
+            rows, unmatched = ti.read_tabular_file(path)
+        except Exception as e:
+            messagebox.showerror("Couldn't read file", str(e))
             return
-        self._start_worker(paths)
+        if not rows:
+            messagebox.showinfo("Nothing found", "No data rows were found in that file.")
+            return
+        base_name = os.path.basename(path)
+        for fields in rows:
+            self._add_row(base_name, fields, "From spreadsheet")
+        self.progress_lbl.configure(text=f"Added {len(rows)} row(s) from {base_name}.")
+        if unmatched:
+            messagebox.showinfo(
+                "Some columns weren't recognised",
+                "These column headers weren't understood and were skipped:\n\n"
+                + ", ".join(unmatched) +
+                "\n\nRename them to something like 'Full Name', 'Passport Number', "
+                "'Nationality', 'Emirates ID No', etc. and re-import if you need that data, "
+                "or fill it in manually in the table.")
 
     def _start_worker(self, paths):
         self._cancel_flag.clear()
@@ -182,69 +195,23 @@ class BulkImportDialog(tk.Toplevel):
                 if self._cancel_flag.is_set():
                     break
                 try:
-                    fields, used_ocr, _preview = pe.extract_employee_fields(p)
-                    if fields:
-                        note = "Read via OCR - please verify" if used_ocr else "Read from PDF text"
-                    else:
-                        note = "Nothing recognised - fill in manually"
+                    records = pe.extract_employee_records(p)
                 except Exception as e:
-                    fields, note = {}, f"Extraction error: {e}"
-                self._queue.put(("row", os.path.basename(p), fields, note))
+                    records = [({}, False, f"Extraction error: {e}")]
+                base_name = os.path.basename(p)
+                multi = len(records) > 1
+                for fields, used_ocr, note in records:
+                    if not note:
+                        note = "Read via OCR - please verify" if used_ocr else "Read from PDF text"
+                    if not fields and "couldn't be read" not in note and "error" not in note.lower():
+                        note = "Nothing recognised - fill in manually"
+                    label = f"{base_name} (roster)" if multi else base_name
+                    self._queue.put(("row", label, fields, note))
                 self._queue.put(("progress", i, len(paths), None))
             self._queue.put(("done", len(paths), None, None))
 
         self._worker = threading.Thread(target=work, daemon=True)
         self._worker.start()
-
-    @staticmethod
-    def _norm_identity(value):
-        return "".join(ch.lower() for ch in (value or "") if ch.isalnum())
-
-    def merge_matching(self):
-        """Merge rows that clearly belong to the same employee.
-        Strong identifiers (passport/EID) take priority; otherwise a normalized
-        full name is used. This is useful when passport, EID and visa are
-        separate files for the same person.
-        """
-        active = [r for r in self.rows if r is not None]
-        groups = {}
-        for row in active:
-            keys = []
-            if row.get("passport_no"):
-                keys.append(("passport", self._norm_identity(row["passport_no"])))
-            if row.get("emirates_id_no"):
-                keys.append(("eid", self._norm_identity(row["emirates_id_no"])))
-            if row.get("full_name") and row.get("date_of_birth"):
-                keys.append(("name_dob", self._norm_identity(row["full_name"]) + self._norm_identity(row["date_of_birth"])))
-            key = next((k for k in keys if k[1]), None)
-            if key:
-                groups.setdefault(key, []).append(row)
-
-        merged_count = 0
-        for _key, group in groups.items():
-            if len(group) < 2:
-                continue
-            master = group[0]
-            for other in group[1:]:
-                for c in EDITABLE_COLUMNS:
-                    if not master.get(c) and other.get(c):
-                        master[c] = other[c]
-                note = master.get("notes", "")
-                other_note = other.get("notes", "")
-                if other_note and other_note not in note:
-                    master["notes"] = (note + " | " + other_note).strip(" |")
-                master["file"] = (master.get("file","") + " + " + other.get("file","")).strip(" +")
-                other["include"] = False
-                merged_count += 1
-
-        # Rebuild the visible table from the merged row data.
-        self.tree.delete(*self.tree.get_children())
-        for idx, row in enumerate(self.rows):
-            if row is not None and row.get("include", True):
-                self.tree.insert("", "end", iid=str(idx), values=self._row_values(row))
-        messagebox.showinfo("Merge complete",
-                            f"Merged {merged_count} duplicate document row(s).\n"
-                            "Review the combined rows before importing.")
 
     def _cancel(self):
         self._cancel_flag.set()
@@ -266,7 +233,7 @@ class BulkImportDialog(tk.Toplevel):
 
     # ------------------------------------------------------------- rows
     def _add_row(self, filename, fields, note):
-        row = {"include": True, "file": filename, "notes": note}
+        row = {"include": True, "file": filename, "status_note": note}
         for c in EDITABLE_COLUMNS:
             row[c] = fields.get(c, "")
         self.rows.append(row)

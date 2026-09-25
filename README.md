@@ -60,12 +60,12 @@ bank guarantees, etc.) via the free-form "Other Documents" tab.
   CSV (always available) or Excel (`pip install openpyxl` for
   colour-coded `.xlsx`).
 - **Import from PDF / Scanned Documents / Photos** (Employees tab) —
-  select many passport, Emirates ID, visa, labour-card or other document
-  PDFs/photos at once, or select an entire folder. The app reads names,
-  document numbers and dates automatically. Separate documents for the
-  same employee can be merged by passport number, Emirates ID, or
-  name + date of birth. Every result is shown in an editable review table
-  before anything is saved. This is designed for large employee batches.
+  select any number of passport, Emirates ID, or visa PDFs/photos at
+  once and the app reads names, numbers, and expiry dates out of them
+  automatically, so you don't have to type in thousands of employees by
+  hand. Every result is shown in an editable table for you to check and
+  fix before anything is saved. See **section 4** below for what this
+  needs installed.
 - **Settings** — adjust the Critical / Warning / Upcoming day
   thresholds to match your own renewal lead-time policy; upload your
   company logo (shown at the top of the app); create a Desktop
@@ -111,12 +111,9 @@ automatically backed up every time you close the app (see section 5).
 
 ## 4. Setting up "Import from PDF / Scanned Documents / Photos"
 
-The Employees tab has **Import from PDF/Photos** and **Add Folder**
-buttons. They read passport, Emirates ID, visa, labour-card and related
-documents automatically instead of you typing every employee in by hand.
-Use **Merge Matching Documents** when an employee has separate passport,
-Emirates ID and visa files; the importer combines clearly matching records
-before import. It has two tiers of capability,
+The Employees tab has an **Import from PDF/Photos** button that reads
+passport, Emirates ID, and visa documents automatically instead of you
+typing every employee in by hand. It has two tiers of capability,
 each needing different optional packages — the app tells you in
 **Settings** which of these you currently have:
 
@@ -143,6 +140,22 @@ is far more reliable than reading the printed text, when it's visible
 in the scan/photo. Emirates ID, visa, and labour card documents are
 read by looking for their labelled fields (ID number, "Date of
 Expiry", etc.).
+
+**Multi-employee roster files**: some government portals (e.g. MOHRE's
+"List of Employees by Establishment" export) put a whole table of
+employees in one PDF. The import tool detects this automatically and
+turns one such file into several rows in the review table instead of
+one. This only works when the file has real, readable text — a photo
+or a low-resolution screenshot of that same table usually can't be
+read reliably by OCR at all (the text is often too small), so:
+
+**"Import CSV/Excel..."** is the reliable fallback for exactly that
+case. Type or paste the employee data into a spreadsheet (column
+headers like "Full Name", "Passport Number", "Nationality", "Job
+Name", "Card Number", "Card Expiry", etc. are recognised automatically
+— see `app/tabular_import.py` for the full list of accepted header
+names) and every row imports exactly as typed, with zero OCR
+guessing involved.
 
 **Because OCR is never 100% accurate**, nothing is saved automatically
 — every import shows an editable table first so you (or whoever is
@@ -183,10 +196,8 @@ they get bundled in.
 - **Desktop shortcut**: Settings → **Create Desktop Shortcut** adds an
   icon on your Windows Desktop that launches the app directly (it uses
   your uploaded company logo as the icon if you've set one).
-- **Automatic backups**: the app makes a timestamped safety copy every
-  5 minutes while running and again when you close the app. A missing
-  primary database can also be recovered automatically from the newest
-  valid safety copy. Backups are saved to
+- **Automatic backups**: every time you close the app, a timestamped
+  copy of the database is saved to
   `%APPDATA%\EmployeeResidenceManager\backups\` (the most recent 20
   copies are kept). Settings → **Automatic backups** lists them, with a
   one-click **Restore Selected**.

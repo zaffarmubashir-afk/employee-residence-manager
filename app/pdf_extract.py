@@ -56,20 +56,8 @@ except ImportError:
     HAVE_PIL = False
 
 try:
-    import pytesseract  # Python wrapper; the Tesseract engine is installed separately
+    import pytesseract  # needs the separate Tesseract-OCR program installed too
     HAVE_TESSERACT = True
-    # Common Windows installation locations. This lets OCR work without
-    # requiring the user to edit PATH manually.
-    if os.name == "nt":
-        _tess_candidates = [
-            os.environ.get("TESSERACT_CMD", ""),
-            r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
-            r"C:\\Program Files (x86)\\Tesseract-OCR\\tesseract.exe",
-        ]
-        for _candidate in _tess_candidates:
-            if _candidate and os.path.exists(_candidate):
-                pytesseract.pytesseract.tesseract_cmd = _candidate
-                break
 except ImportError:
     HAVE_TESSERACT = False
 
@@ -103,30 +91,7 @@ def _ocr_image(img):
     if not HAVE_TESSERACT:
         return ""
     try:
-        # Improve common phone scans/photos: grayscale, contrast and a
-        # moderate upscale. Keep the original available as a fallback.
-        work = img
-        if HAVE_PIL:
-            from PIL import ImageOps, ImageEnhance, ImageFilter
-            if work.mode not in ("L", "RGB"):
-                work = work.convert("RGB")
-            gray = ImageOps.grayscale(work)
-            gray = ImageEnhance.Contrast(gray).enhance(1.6)
-            if gray.width < 1800:
-                scale = min(2.0, 1800 / max(1, gray.width))
-                gray = gray.resize((int(gray.width * scale), int(gray.height * scale)))
-            work = gray.filter(ImageFilter.SHARPEN)
-        langs = "eng"
-        try:
-            available = pytesseract.get_languages(config="")
-            if "ara" in available:
-                langs = "eng+ara"
-        except Exception:
-            pass
-        text = pytesseract.image_to_string(work, lang=langs, config="--psm 6")
-        if not text.strip() and work is not img:
-            text = pytesseract.image_to_string(img, lang="eng", config="--psm 6")
-        return text
+        return pytesseract.image_to_string(img)
     except Exception:
         return ""
 
@@ -300,19 +265,6 @@ def _find_date_near(lines, *keywords):
     return ""
 
 
-def _find_labeled_value(text, labels, max_len=80):
-    """Find a value following one of several labels on the same line."""
-    label_re = "|".join(re.escape(x) for x in labels)
-    m = re.search(rf"(?:{label_re})\\s*(?:NO\\.?|NUMBER|NUM|#)?\\s*[:\\-]?\\s*([A-Z0-9][A-Z0-9 ./\\-]{{2,{max_len}}})", text, re.I)
-    return m.group(1).strip(" .:-") if m else ""
-
-def _find_number_by_pattern(text, patterns):
-    for pattern in patterns:
-        m = re.search(pattern, text, re.I)
-        if m:
-            return m.group(1).strip()
-    return ""
-
 def parse_labelled_fields(text):
     """Heuristic, label-driven extraction used for everything that isn't
     a passport MRZ: Emirates ID, residence visa, labour card, and as a
@@ -364,45 +316,6 @@ def parse_labelled_fields(text):
         if exp:
             result.setdefault("labour_card_expiry", exp)
 
-    if "MEDICAL" in upper or "FITNESS" in upper:
-        dt = _find_date_near(lines, "DATE OF TEST", "TEST DATE", "MEDICAL DATE")
-        if dt:
-            result.setdefault("medical_test_date", dt)
-        exp = _find_date_near(lines, "EXPIRY", "VALID UNTIL")
-        if exp:
-            result.setdefault("medical_test_expiry", exp)
-
-    if "INSURANCE" in upper or "POLICY" in upper:
-        value = _find_labeled_value(joined, ["POLICY NO", "POLICY NUMBER", "POLICY"])
-        if value:
-            result.setdefault("insurance_policy_no", value[:80])
-        exp = _find_date_near(lines, "EXPIRY", "VALID UNTIL", "POLICY EXPIRY")
-        if exp:
-            result.setdefault("insurance_expiry", exp)
-
-    # Common UAE document numbers. These are deliberately conservative:
-    # the import window remains editable so OCR mistakes can be corrected.
-    value = _find_labeled_value(joined, ["RESIDENCE VISA", "RESIDENCY VISA", "VISA NO", "VISA NUMBER"])
-    if value:
-        result.setdefault("residence_visa_no", value[:80])
-
-    value = _find_labeled_value(joined, ["ENTRY PERMIT", "ENTRY PERMIT NO", "PERMIT NUMBER"])
-    if value:
-        result.setdefault("entry_permit_no", value[:80])
-
-    value = _find_labeled_value(joined, ["LABOUR CARD", "LABOR CARD", "WORK PERMIT", "WORK CARD"])
-    if value:
-        result.setdefault("labour_card_no", value[:80])
-
-    value = _find_labeled_value(joined, ["EMPLOYMENT CONTRACT", "CONTRACT NO", "CONTRACT NUMBER"])
-    if value:
-        result.setdefault("employment_contract_no", value[:80])
-
-    if "PHONE" in upper or "MOBILE" in upper or "TEL" in upper:
-        value = _find_labeled_value(joined, ["PHONE", "MOBILE", "MOBILE NO", "TEL", "TELEPHONE"])
-        if value:
-            result.setdefault("phone", value[:40])
-
     if re.search(r'\bSEX\s*[:\-]?\s*M\b', upper) or re.search(r'\bMALE\b', upper):
         result.setdefault("gender", "Male")
     elif re.search(r'\bSEX\s*[:\-]?\s*F\b', upper) or re.search(r'\bFEMALE\b', upper):
@@ -412,8 +325,9 @@ def parse_labelled_fields(text):
 
 
 def extract_employee_fields(path):
-    """Top-level entry point used by the bulk-import UI.
-    Returns (fields_dict, used_ocr: bool, raw_text_preview: str)."""
+    """Top-level entry point for a file expected to hold ONE employee's
+    documents (passport/EID/visa). Returns
+    (fields_dict, used_ocr: bool, raw_text_preview: str)."""
     text, used_ocr = extract_text(path)
     if not text.strip():
         return {}, used_ocr, ""
@@ -424,3 +338,121 @@ def extract_employee_fields(path):
         fields.setdefault(k, v)
 
     return fields, used_ocr, text[:2000]
+
+
+# --------------------------------------------------- multi-employee rosters
+# Some UAE government portals (MOHRE "List of Employees by Establishment",
+# GDRFA visa-status lists, etc.) export a single PDF containing a TABLE of
+# many employees at once - passport no., name, job, nationality, permit/
+# card number, expiry, contract type. One uploaded file should then become
+# several employee rows, not one.
+
+NATIONALITY_WORDS = [
+    "PHILIPPINES", "SYRIA", "PAKISTAN", "INDIA", "BANGLADESH", "EGYPT", "JORDAN",
+    "LEBANON", "SUDAN", "NEPAL", "SRI LANKA", "NIGERIA", "KENYA", "ETHIOPIA",
+    "MOROCCO", "TUNISIA", "ALGERIA", "YEMEN", "IRAQ", "AFGHANISTAN", "INDONESIA",
+    "CHINA", "UNITED KINGDOM", "SOUTH AFRICA", "UNITED ARAB EMIRATES", "JAMAICA",
+    "GHANA", "UGANDA", "CAMEROON", "TURKEY", "IRAN", "RUSSIA", "UKRAINE",
+    "USA", "UNITED STATES", "CANADA", "AUSTRALIA", "FRANCE", "GERMANY",
+    "THAILAND", "VIETNAM", "MYANMAR", "MALAYSIA", "SINGAPORE",
+]
+_NAT_ALT = "|".join(sorted(NATIONALITY_WORDS, key=len, reverse=True))
+
+_ROSTER_ROW_RICH_RE = re.compile(
+    r'(?P<passport>[A-Z]{1,2}\d{6,9}[A-Z]?)\s*\n'
+    r'(?P<name>[A-Z][A-Za-z .\'\-]{2,58})\s*\n'
+    r'[\s\S]*?'
+    r'(?P<card_type>[A-Za-z][A-Za-z/ ]{5,55}?(?:PERMIT|SPONSORSHIP))\s*\n'
+    r'[\s\S]*?'
+    r'(?P<job>[A-Za-z][A-Za-z /]{2,40})\s*\n'
+    r'(?P<nationality>' + _NAT_ALT + r')\s*\n'
+    r'(?P<card_no>\d{8,9})\s*\n'
+    r'(?P<expiry>\d{2}/\d{2}/\d{4})\s*\n?'
+    r'(?P<contract>Limited|Unlimited)',
+    re.IGNORECASE,
+)
+
+_ROSTER_ROW_SIMPLE_RE = re.compile(
+    r'(?P<passport>[A-Z]{1,2}\d{6,9}[A-Z]?)\s*\n'
+    r'(?P<name>[A-Z][A-Za-z .\'\-]{2,58})\s*\n'
+    r'[\s\S]*?'
+    r'(?P<nationality>' + _NAT_ALT + r')\s*\n'
+    r'(?P<card_no>\d{8,9})\s*\n'
+    r'(?P<expiry>\d{2}/\d{2}/\d{4})\s*\n?'
+    r'(?P<contract>Limited|Unlimited)',
+    re.IGNORECASE,
+)
+
+
+def looks_like_roster(text):
+    upper = text.upper()
+    return ("LIST OF EMPLOYEES" in upper or "TOTAL NUMBER OF EMPLOYEES" in upper
+            or len(_ROSTER_ROW_SIMPLE_RE.findall(text)) >= 2)
+
+
+def parse_employee_roster(text):
+    """Return a list of employee field-dicts extracted from a multi-employee
+    roster/table document. Empty list if the text doesn't look like one."""
+    rows = []
+    matches = list(_ROSTER_ROW_RICH_RE.finditer(text))
+    use_rich = len(matches) >= 2
+    if not use_rich:
+        matches = list(_ROSTER_ROW_SIMPLE_RE.finditer(text))
+    if len(matches) < 2:
+        return []
+
+    for m in matches:
+        gd = m.groupdict()
+        fields = {
+            "passport_no": gd["passport"].strip(),
+            "full_name": re.sub(r'\s+', ' ', gd["name"]).strip().title(),
+            "nationality": gd["nationality"].strip().title(),
+            "labour_card_no": gd["card_no"].strip(),
+            "labour_card_expiry": _norm_date(gd["expiry"].strip()),
+        }
+        job = gd.get("job")
+        if job:
+            job_clean = re.sub(r'\s+', ' ', job).strip()
+            if 2 <= len(job_clean) <= 40:
+                fields["job_title"] = job_clean.title()
+        card_type = gd.get("card_type")
+        note_bits = []
+        if card_type:
+            note_bits.append(re.sub(r'\s+', ' ', card_type).strip().title())
+        if gd.get("contract"):
+            note_bits.append(f"{gd['contract'].title()} contract")
+        if note_bits:
+            fields["notes"] = " - ".join(note_bits)
+        rows.append(fields)
+    return rows
+
+
+def extract_employee_records(path):
+    """Top-level entry point used by the bulk-import UI. Handles BOTH a
+    single ID document and a multi-employee roster/table file.
+    Returns a list of (fields_dict, used_ocr: bool, note: str) - one item
+    for a normal document, several for a roster."""
+    text, used_ocr = extract_text(path)
+    if not text.strip():
+        return [({}, used_ocr, "")]
+
+    if looks_like_roster(text):
+        roster_rows = parse_employee_roster(text)
+        if roster_rows:
+            return [(fields, used_ocr, f"Row {i + 1} of {len(roster_rows)} in an employee list/roster file")
+                    for i, fields in enumerate(roster_rows)]
+        # Looked like a roster (has the header text) but rows didn't parse -
+        # most likely the table cells themselves are too small/low-quality
+        # for OCR to read, even though the page headers/footers came through.
+        return [({}, used_ocr, "This looks like an employee list/roster, but the row "
+                                "data couldn't be read clearly (image too small/low-res "
+                                "for the table text). Try the original PDF instead of a "
+                                "screenshot, or a higher-resolution scan.")]
+
+    fields = {}
+    fields.update(parse_passport_mrz(text))
+    for k, v in parse_labelled_fields(text).items():
+        fields.setdefault(k, v)
+    if not fields:
+        return [({}, used_ocr, "")]
+    return [(fields, used_ocr, "")]

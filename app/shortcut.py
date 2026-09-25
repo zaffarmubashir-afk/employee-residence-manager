@@ -17,23 +17,6 @@ import sys
 import subprocess
 import tempfile
 
-
-def _prepare_icon(icon_path):
-    """Return a Windows-friendly .ico path when a raster logo is supplied."""
-    if not icon_path or not os.path.exists(icon_path):
-        return None
-    if icon_path.lower().endswith(".ico"):
-        return icon_path
-    try:
-        from PIL import Image
-        ico_path = os.path.join(os.path.dirname(icon_path), "company_logo.ico")
-        img = Image.open(icon_path).convert("RGBA")
-        img.thumbnail((256, 256))
-        img.save(ico_path, format="ICO", sizes=[(256,256), (128,128), (64,64), (32,32), (16,16)])
-        return ico_path
-    except Exception:
-        return icon_path
-
 APP_TITLE = "EmployeeResidenceManager"
 APP_DESCRIPTION = "UAE Employee & Company Residence / Document Management System"
 
@@ -87,7 +70,7 @@ def _create_windows_shortcut(icon_path=None):
 
     shortcut_path = os.path.join(desktop, f"{APP_TITLE}.lnk")
     target, args, workdir = _launch_target()
-    icon = _prepare_icon(icon_path) or target
+    icon = icon_path if (icon_path and os.path.exists(icon_path)) else target
 
     vbs = (
         'Set oWS = WScript.CreateObject("WScript.Shell")\n'
